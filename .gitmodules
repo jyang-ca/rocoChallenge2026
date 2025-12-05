@@ -1,0 +1,6 @@
+[submodule "gearboxAssembly"]
+	path = submodules/gearboxAssembly
+	url = https://github.com/jonhpark7966/gearboxAssembly.git
+[submodule "IsaacLab"]
+	path = submodules/IsaacLab
+	url = https://github.com/isaac-sim/IsaacLab.git

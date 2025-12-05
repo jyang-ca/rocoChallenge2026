@@ -1,0 +1,22 @@
+[project]
+name = "rocochallenge2026"
+version = "0.1.0"
+description = "Workspace tooling for the RoCo Challenge 2026 gearbox assembly task."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "huggingface_hub>=0.23",
+    "h5py",
+    "numpy",
+    "opencv-python",
+    "imageio",
+    "tqdm",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = ["pre-commit"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

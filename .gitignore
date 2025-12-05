@@ -1,0 +1,23 @@
+# Python / IDE
+__pycache__/
+*.pyc
+.venv/
+.env
+.idea/
+.vscode/
+.DS_Store
+
+# uv
+.uv/
+
+# Data / artifacts
+data/*
+!data/README.md
+roco_data/
+samples/
+*.hdf5
+*.mp4
+*.png
+
+# Logs
+*.log
