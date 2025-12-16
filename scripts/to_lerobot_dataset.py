@@ -2,18 +2,22 @@
 """
 RoCoChallenge HDF5 데이터셋을 LeRobotDataset 형식으로 변환합니다.
 
-다음 4가지 케이스에 대한 실행 커맨드 예시입니다:
+사용법:
 
-1. Local HDF5 -> Local LeRobotDataset (새로운 디렉토리 생성)
+0. huggingface_cli login을 통해 Hugging Face에 로그인합니다.
+
+다음 4가지 케이스에 대한 실행 커맨드입니다:
+
+A. Local HDF5 -> Local LeRobotDataset (새로운 디렉토리 생성)
    python to_lerobot_dataset.py --input path/to/local/hdf5_dir --output path/to/local/output_dir
 
-2. Local HDF5 -> Remote Hugging Face LeRobotDataset (업로드)
+B. Local HDF5 -> Remote Hugging Face LeRobotDataset (업로드)
    python to_lerobot_dataset.py --input path/to/local/hdf5_dir --output https://huggingface.co/datasets/user-name/dataset-name
 
-3. Remote HDF5 -> Local LeRobotDataset (다운로드 및 변환)
+C. Remote HDF5 -> Local LeRobotDataset (다운로드 및 변환)
    python to_lerobot_dataset.py --input https://huggingface.co/datasets/user-name/source-dataset --output path/to/local/output_dir
 
-4. Remote HDF5 -> Remote Hugging Face LeRobotDataset (Hub에서 Hub로 변환)
+D. Remote HDF5 -> Remote Hugging Face LeRobotDataset (Hub에서 Hub로 변환)
    python to_lerobot_dataset.py --input https://huggingface.co/datasets/user-name/source-dataset --output https://huggingface.co/datasets/user-name/target-dataset
 
 LeRobot Dataset Visualizer: https://huggingface.co/spaces/lerobot/visualize_dataset
