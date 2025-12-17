@@ -201,9 +201,9 @@ def read_roco_hdf5(file_path: Path) -> Dict[str, np.ndarray]:
         "observation.images.right_hand": "observations/right_hand_rgb",
         
         # depth 이미지
-        "observation.images.head_depth": "observation.depths.head_depth",
-        "observation.images.left_hand_depth": "observation.depths.left_hand_depth",
-        "observation.images.right_hand_depth": "observation.depths.right_hand_depth",
+        "observation.images.head_depth": "observations/head_depth",
+        "observation.images.left_hand_depth": "observations/left_hand_depth",
+        "observation.images.right_hand_depth": "observations/right_hand_depth",
     }
     
     for lerobot_key, hdf5_key in image_map.items():
