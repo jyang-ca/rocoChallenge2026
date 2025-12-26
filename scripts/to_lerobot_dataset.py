@@ -6,33 +6,50 @@ RoCoChallenge HDF5 데이터셋을 LeRobotDataset 형식으로 변환합니다.
 
 0. huggingface_cli login을 통해 Hugging Face에 로그인합니다.
 
-다음 4가지 케이스에 대한 실행 커맨드입니다:
+# 기본 사용 (전체 변환)
+python to_lerobot_dataset.py \
+    --input https://huggingface.co/datasets/rocochallenge2025/rocochallenge2025 \
+    --output https://huggingface.co/datasets/yjsm1203/roco_2
 
-A. Local HDF5 -> Local LeRobotDataset (새로운 디렉토리 생성)
-   python to_lerobot_dataset.py --input path/to/local/hdf5_dir --output path/to/local/output_dir
+# 배치 처리 예시 (192개 파일을 50개씩):
 
-B. Local HDF5 -> Remote Hugging Face LeRobotDataset (업로드)
-   python to_lerobot_dataset.py --input path/to/local/hdf5_dir --output https://huggingface.co/datasets/user-name/dataset-name
+# 배치 1: 0-49
+python to_lerobot_dataset.py \
+    --input https://huggingface.co/datasets/rocochallenge2025/rocochallenge2025 \
+    --output https://huggingface.co/datasets/yjsm1203/roco_2 \
+    --start-episode 0 --end-episode 50 --clean-cache
 
-C. Remote HDF5 -> Local LeRobotDataset (다운로드 및 변환)
-   python to_lerobot_dataset.py --input https://huggingface.co/datasets/user-name/source-dataset --output path/to/local/output_dir
+# 배치 2: 50-99 (기존 데이터셋에 추가)
+python to_lerobot_dataset.py \
+    --input https://huggingface.co/datasets/rocochallenge2025/rocochallenge2025 \
+    --output https://huggingface.co/datasets/yjsm1203/roco_2 \
+    --start-episode 50 --end-episode 100 --resume --clean-cache
 
-D. Remote HDF5 -> Remote Hugging Face LeRobotDataset (Hub에서 Hub로 변환)
-   python to_lerobot_dataset.py --input https://huggingface.co/datasets/user-name/source-dataset --output https://huggingface.co/datasets/user-name/target-dataset
+# 배치 3: 100-149
+python to_lerobot_dataset.py \
+    --input https://huggingface.co/datasets/rocochallenge2025/rocochallenge2025 \
+    --output https://huggingface.co/datasets/yjsm1203/roco_2 \
+    --start-episode 100 --end-episode 150 --resume --clean-cache
+
+# 배치 4: 150-192 (마지막)
+python to_lerobot_dataset.py \
+    --input https://huggingface.co/datasets/rocochallenge2025/rocochallenge2025 \
+    --output https://huggingface.co/datasets/yjsm1203/roco_2 \
+    --start-episode 150 --resume --clean-cache
 
 LeRobot Dataset Visualizer: https://huggingface.co/spaces/lerobot/visualize_dataset
 """
 
 import argparse
 import logging
+import re
 import shutil
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import List, Dict
 
 import h5py
 import numpy as np
-import torch
-from huggingface_hub import HfApi, hf_hub_download, snapshot_download
+from huggingface_hub import HfApi, hf_hub_download
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -51,13 +68,13 @@ def parse_args():
         "--input",
         type=str,
         required=True,
-        help="로컬 HDF5 파일/디렉토리 경로 또는 Hugging Face repo Url (예: 'https://huggingface.co/datasets/rocochallenge2025/rocochallenge2025').",
+        help="로컬 HDF5 파일/디렉토리 경로 또는 Hugging Face repo Url",
     )
     parser.add_argument(
         "--output",
         type=str,
         required=True,
-        help="로컬 출력 디렉토리 경로 또는 업로드할 Hugging Face repo Url (예: 'https://huggingface.co/datasets/rocochallenge2025/rocochallenge2025').",
+        help="로컬 출력 디렉토리 경로 또는 업로드할 Hugging Face repo Url",
     )
     parser.add_argument(
         "--local-dir",
@@ -68,60 +85,100 @@ def parse_args():
     parser.add_argument(
         "--robot-type",
         type=str,
-        default="galaxea_r1", # RoCo2026
+        default="galaxea_r1",
         help="메타데이터에 사용할 로봇 타입 이름.",
     )
     parser.add_argument(
         "--fps",
         type=int,
-        default=15, # RoCo2026
+        default=15,
         help="데이터셋의 초당 프레임 수 (FPS).",
+    )
+    parser.add_argument(
+        "--start-episode",
+        type=int,
+        default=0,
+        help="처리 시작 인덱스 (0-based, inclusive)",
+    )
+    parser.add_argument(
+        "--end-episode",
+        type=int,
+        default=None,
+        help="처리 종료 인덱스 (exclusive). None이면 끝까지.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="기존 원격 데이터셋에 이어서 추가 (Hub에서 다운로드 후 append)",
+    )
+    parser.add_argument(
+        "--clean-cache",
+        action="store_true",
+        help="업로드 후 캐시 디렉토리 삭제",
     )
 
     return parser.parse_args()
 
 
+def natural_sort_key(path: Path):
+    """자연수 정렬 키 (1, 2, 10 순서로 정렬)"""
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', path.stem)]
+
 
 def extract_repo_id(path_or_url: str) -> str:
     """Hugging Face URL에서 repo_id ('user/repo')를 추출하거나 원본 문자열을 반환합니다."""
     if path_or_url.startswith("http"):
-        # 휴리스틱: '/'로 분리하고 'huggingface.co'가 포함된 경우 마지막 두 부분을 가져옵니다.
-        # 예: https://huggingface.co/datasets/user/repo -> user/repo
-        # 예: https://huggingface.co/user/repo -> user/repo
         parts = path_or_url.rstrip("/").split("/")
         if "huggingface.co" in path_or_url:
             if "datasets" in parts:
                 idx = parts.index("datasets")
                 if idx + 2 < len(parts):
                     return f"{parts[idx+1]}/{parts[idx+2]}"
-            # datasets가 없는 경우 (예: model repo 등)
-            # URL 구조가 https://huggingface.co/user/repo 라고 가정
             elif len(parts) >= 2:
-                 return f"{parts[-2]}/{parts[-1]}"
-    
+                return f"{parts[-2]}/{parts[-1]}"
     return path_or_url
 
 
-# Arg로 받은 --input이 로컬 파일인지, Hugging Face Repo ID인지 확인하는 함수
 def is_remote_repo(path_or_id: str) -> bool:
-    """문자열이 Hugging Face repo ID 처럼 보이는지 확인합니다 ('/' 포함 여부 등)."""
-    # 해당 경로의 파일이 로컬에 존재하는지 확인
+    """문자열이 Hugging Face repo ID 처럼 보이는지 확인합니다."""
     if Path(path_or_id).exists() or Path(path_or_id).parent.exists():
         return False
-    # 상대경로로 시작하는지 확인
     if path_or_id.startswith("/") or path_or_id.startswith("./") or path_or_id.startswith("../"):
         return False
-    # Hugging Face Repo ID로 시작하는지 확인 (http/https URL 포함)
     if path_or_id.startswith("http://") or path_or_id.startswith("https://"):
         return True
     return "/" in path_or_id
 
 
-def get_local_hdf5_paths(input_path: str, local_cache_dir: Path) -> List[Path]:
-    """입력 경로를 로컬 HDF5 파일 경로 리스트로 변환합니다."""
-    # URL 입력을 처리하여 가능한 경우 repo_id를 추출하거나 그대로 사용합니다.
-    input_path = extract_repo_id(input_path)
+def get_remote_hdf5_file_list(repo_id: str) -> List[str]:
+    """원격 HF repo의 HDF5 파일 목록을 가져옵니다 (정렬됨)."""
+    api = HfApi()
+    files_in_repo = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
+    hdf5_files = [f for f in files_in_repo if f.endswith(".hdf5")]
     
+    if not hdf5_files:
+        raise ValueError(f"원격 repo에서 HDF5 파일을 찾을 수 없습니다: {repo_id}")
+    
+    # 자연수 정렬
+    hdf5_files.sort(key=lambda x: natural_sort_key(Path(x)))
+    return hdf5_files
+
+
+def download_hdf5_file(repo_id: str, filename: str, local_dir: Path) -> Path:
+    """단일 HDF5 파일을 다운로드합니다."""
+    p = hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        repo_type="dataset",
+        local_dir=local_dir,
+    )
+    return Path(p)
+
+
+def get_local_hdf5_paths(input_path: str, local_cache_dir: Path, 
+                          start_idx: int = 0, end_idx: int = None) -> List[Path]:
+    """입력 경로를 로컬 HDF5 파일 경로 리스트로 변환합니다."""
+    input_path = extract_repo_id(input_path)
     path = Path(input_path)
     
     # Case 1: 로컬 파일인 경우
@@ -133,35 +190,41 @@ def get_local_hdf5_paths(input_path: str, local_cache_dir: Path) -> List[Path]:
         files = list(path.glob("**/*.hdf5"))
         if not files:
             raise ValueError(f"디렉토리에서 HDF5 파일을 찾을 수 없습니다: {input_path}")
+        files.sort(key=natural_sort_key)
+        
+        # 범위 적용
+        if end_idx is not None:
+            files = files[start_idx:end_idx]
+        else:
+            files = files[start_idx:]
         return files
 
     # Case 3: 원격 HF Repo인 경우
     if is_remote_repo(input_path):
         logger.info(f"원격 HF repo 감지됨: {input_path}")
-        # 관련 파일 다운로드
+        
+        # 전체 파일 목록 조회
+        all_files = get_remote_hdf5_file_list(input_path)
+        logger.info(f"원격 repo에 총 {len(all_files)}개의 HDF5 파일이 있습니다.")
+        
+        # 범위 적용
+        if end_idx is not None:
+            target_files = all_files[start_idx:end_idx]
+        else:
+            target_files = all_files[start_idx:]
+        
+        logger.info(f"다운로드할 파일: {len(target_files)}개 (인덱스 {start_idx} ~ {start_idx + len(target_files) - 1})")
+        
+        # 다운로드 디렉토리
         local_dir = local_cache_dir / input_path.replace("/", "_")
-        try:
-            # .hdf5 파일만 필터링합니다. 
-            api = HfApi()
-            files_in_repo = api.list_repo_files(repo_id=input_path, repo_type="dataset")
-            hdf5_files = [f for f in files_in_repo if f.endswith(".hdf5")]
-            
-            if not hdf5_files:
-                raise ValueError(f"원격 repo에서 HDF5 파일을 찾을 수 없습니다: {input_path}")
-
-            downloaded_paths = []
-            for file in hdf5_files:
-                p = hf_hub_download(
-                    repo_id=input_path,
-                    filename=file,
-                    repo_type="dataset",
-                    local_dir=local_dir,
-                )
-                downloaded_paths.append(Path(p))
-            return downloaded_paths
-
-        except Exception as e:
-            raise RuntimeError(f"HF repo {input_path}에서 다운로드 실패: {e}")
+        
+        downloaded_paths = []
+        for i, filename in enumerate(target_files):
+            logger.info(f"다운로드 중 ({i+1}/{len(target_files)}): {filename}")
+            p = download_hdf5_file(input_path, filename, local_dir)
+            downloaded_paths.append(p)
+        
+        return downloaded_paths
 
     raise ValueError(f"입력 '{input_path}'를 로컬에서 찾을 수 없으며 유효한 HF repo로 보이지 않습니다.")
 
@@ -179,45 +242,44 @@ def read_roco_hdf5(file_path: Path) -> Dict[str, np.ndarray]:
 
     data = {}
     
-    # 1D 배열을 2D로 정리하는 헬퍼 함수
     def get_and_ensure_2d(key):
         val = raw_data.get(key)
         if val is not None:
-             if val.ndim == 1:
-                 return val[:, None]
-             return val
-        # logger.warning(f"키 {key}를 HDF5에서 찾을 수 없습니다")
+            if val.ndim == 1:
+                return val[:, None]
+            return val
         return None
 
-    # Mapping
-    # [actions] -> actions/key
-    # [observations] -> observations/key
-    
-    # 1. 이미지 (Images)
-    # observations/head_rgb, observations/left_hand_rgb, observations/right_hand_rgb
+    # 1. 이미지 (RGB)
     image_map = {
         "observation.images.head": "observations/head_rgb",
         "observation.images.left_hand": "observations/left_hand_rgb",
         "observation.images.right_hand": "observations/right_hand_rgb",
-        
-        # depth 이미지
-        "observation.images.head_depth": "observations/head_depth",
-        "observation.images.left_hand_depth": "observations/left_hand_depth",
-        "observation.images.right_hand_depth": "observations/right_hand_depth",
     }
     
     for lerobot_key, hdf5_key in image_map.items():
         if hdf5_key in raw_data:
             val = raw_data[hdf5_key]
-            # 이미지(T, H, W, C). Depth 이미지는(T, H, W).
             if val.ndim == 3:
                 val = val[..., None]
             data[lerobot_key] = val
 
-    # 2. 액션 (Action)
-    # [actions]
-    # left_arm_action, left_gripper_action, right_arm_action, right_gripper_action
+    # 2. Depth 이미지
+    depth_map = {
+        "observation.depths.head": "observations/head_depth",
+        "observation.depths.left_hand": "observations/left_hand_depth",
+        "observation.depths.right_hand": "observations/right_hand_depth",
+    }
     
+    for lerobot_key, hdf5_key in depth_map.items():
+        if hdf5_key in raw_data:
+            val = raw_data[hdf5_key]
+            # Depth는 보통 (T, H, W) 형태, channel 차원 추가 필요 시 처리
+            if val.ndim == 3:
+                val = val[..., None]  # (T, H, W) -> (T, H, W, 1)
+            data[lerobot_key] = val
+
+    # 3. 액션
     action_components = [
         "actions/left_arm_action",  
         "actions/left_gripper_action", 
@@ -226,7 +288,6 @@ def read_roco_hdf5(file_path: Path) -> Dict[str, np.ndarray]:
     ]
     
     collected_actions = []
-    
     for k in action_components:
         val = get_and_ensure_2d(k)
         if val is not None:
@@ -235,17 +296,12 @@ def read_roco_hdf5(file_path: Path) -> Dict[str, np.ndarray]:
     if collected_actions:
         data["action"] = np.concatenate(collected_actions, axis=1)
 
-    # 3. 상태 (State)
-    # [observations]
-    # left_arm_joint_pos, left_arm_joint_vel, left_gripper_joint_pos, left_gripper_joint_vel,
-    # right_arm_joint_pos, right_arm_joint_vel, right_gripper_joint_pos, right_gripper_joint_vel
-    
+    # 4. 상태
     state_keys = [
         "observations/left_arm_joint_pos",
         "observations/left_arm_joint_vel",
         "observations/left_gripper_joint_pos",
         "observations/left_gripper_joint_vel",
-        
         "observations/right_arm_joint_pos",
         "observations/right_arm_joint_vel",
         "observations/right_gripper_joint_pos",
@@ -256,7 +312,7 @@ def read_roco_hdf5(file_path: Path) -> Dict[str, np.ndarray]:
     for k in state_keys:
         val = get_and_ensure_2d(k)
         if val is not None:
-             collected_states.append(val)
+            collected_states.append(val)
              
     if collected_states:
         data["observation.state"] = np.concatenate(collected_states, axis=1)
@@ -264,71 +320,24 @@ def read_roco_hdf5(file_path: Path) -> Dict[str, np.ndarray]:
     return data
 
 
-def main():
-    args = parse_args()
-    local_cache_dir = Path(args.local_dir)
-    local_cache_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1. 입력 파일 목록 가져오기
-    input_files = get_local_hdf5_paths(args.input, local_cache_dir)
-    logger.info(f"{len(input_files)}개의 처리할 HDF5 파일을 찾았습니다.")
-
-    # 2. 출력 모드 결정 (로컬 vs 원격)
-    is_remote_output = is_remote_repo(args.output)
-    
-    if is_remote_output:
-        repo_id = extract_repo_id(args.output)
-        output_dir = local_cache_dir / "lerobot_build_temp"
-        
-        # 원격 업로드를 위한 임시 디렉토리이므로, 기존에 존재하면 삭제하고 새로 만듭니다.
-        if output_dir.exists():
-            shutil.rmtree(output_dir)
-            
-        create_repo_id = repo_id
-        create_root = output_dir
-    else:
-        # 로컬 출력
-        create_root = Path(args.output).resolve()
-        create_repo_id = create_root.name
-
-        # Safety Check
-        # 1. Check if output is current working directory or parent
-        cwd = Path.cwd().resolve()
-        if create_root == cwd or cwd in create_root.parents:
-             # Allowing subdirectory of CWD is fine, but not CWD itself or parent
-             if create_root == cwd:
-                 raise ValueError(f"출력 디렉토리({create_root})는 현재 작업 디렉토리와 같을 수 없습니다. 안전을 위해 별도의 서브 디렉토리를 지정해주세요.")
-        
-        # 2. Check if output is the script directory
-        script_dir = Path(__file__).parent.resolve()
-        if create_root == script_dir:
-             raise ValueError(f"출력 디렉토리({create_root})는 스크립트가 있는 디렉토리와 같을 수 없습니다.")
-
-    # Handle existing directory
-    if create_root.exists():
-        raise FileExistsError(f"출력 디렉토리 '{create_root}'가 이미 존재합니다. 신규 디렉토리를 지정해주세요.")
-
-    
-    # 3. LeRobot 데이터셋 생성
-    first_data = read_roco_hdf5(input_files[0])
-    
+def create_features_from_data(data: Dict[str, np.ndarray]) -> Dict:
+    """데이터에서 features 정의를 생성합니다."""
     features = {}
-    for key, val in first_data.items():
+    for key, val in data.items():
         if key.startswith("observation.images."):
             shape = val.shape
-            # (T, H, W, C)
             features[key] = {
                 "dtype": "video",
-                "shape": shape[1:], # (H, W, C)
+                "shape": shape[1:],
                 "names": ["height", "width", "channel"],
             }
         elif key.startswith("observation.depths."):
-             shape = val.shape
-             features[key] = {
-                 "dtype": "float32",
-                 "shape": shape[1:], # (H, W, 1)
-                 "names": ["height", "width", "channel"],
-             }
+            shape = val.shape
+            features[key] = {
+                "dtype": "video",
+                "shape": shape[1:],
+                "names": ["height", "width", "channel"],
+            }
         elif key == "action":
             features[key] = {
                 "dtype": "float32",
@@ -341,50 +350,112 @@ def main():
                 "shape": (val.shape[1],),
                 "names": [f"state_{i}" for i in range(val.shape[1])],
             }
+    return features
 
-    dataset = LeRobotDataset.create(
-        repo_id=create_repo_id,
-        fps=args.fps,
-        robot_type=args.robot_type,
-        features=features,
-        root=create_root,
-    )
+
+def main():
+    args = parse_args()
+    local_cache_dir = Path(args.local_dir)
+    local_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    is_remote_output = is_remote_repo(args.output)
+    repo_id = extract_repo_id(args.output) if is_remote_output else None
     
-    # 4. 데이터 반복 및 추가
-    for file_path in input_files:
-        logger.info(f"처리 중: {file_path}")
+    # 1. 입력 파일 목록 가져오기 (범위 적용)
+    input_files = get_local_hdf5_paths(
+        args.input, 
+        local_cache_dir,
+        start_idx=args.start_episode,
+        end_idx=args.end_episode
+    )
+    logger.info(f"{len(input_files)}개의 처리할 HDF5 파일을 찾았습니다.")
+    
+    if not input_files:
+        logger.warning("처리할 파일이 없습니다.")
+        return
+
+    # 2. 데이터셋 준비 (resume 또는 새로 생성)
+    output_dir = local_cache_dir / "lerobot_build_temp"
+    
+    if args.resume and is_remote_output:
+        logger.info(f"기존 데이터셋 다운로드 중: {repo_id}")
+        
+        # 기존 임시 디렉토리 삭제
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        
+        try:
+            # 기존 데이터셋 로드
+            dataset = LeRobotDataset(
+                repo_id=repo_id,
+                root=output_dir,
+            )
+            logger.info(f"기존 데이터셋 로드됨: {dataset.num_episodes}개 에피소드")
+        except Exception as e:
+            logger.error(f"기존 데이터셋 로드 실패: {e}")
+            logger.info("새 데이터셋으로 시작합니다.")
+            args.resume = False
+    
+    if not args.resume:
+        # 새 데이터셋 생성
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        
+        first_data = read_roco_hdf5(input_files[0])
+        features = create_features_from_data(first_data)
+        
+        create_repo_id = repo_id if is_remote_output else Path(args.output).name
+        
+        dataset = LeRobotDataset.create(
+            repo_id=create_repo_id,
+            fps=args.fps,
+            robot_type=args.robot_type,
+            features=features,
+            root=output_dir if is_remote_output else Path(args.output),
+        )
+        logger.info("새 데이터셋 생성됨")
+
+    # 3. 데이터 변환 및 추가
+    for idx, file_path in enumerate(input_files):
+        logger.info(f"처리 중 ({idx+1}/{len(input_files)}): {file_path.name}")
         data = read_roco_hdf5(file_path)
         
-        # 프레임 수 확인
-        # 모든 배열이 동일한 T를 가진다고 가정합니다.
         key0 = next(iter(data))
         num_frames = len(data[key0])
         
-        # 프레임 반복 처리
         for i in range(num_frames):
             frame = {}
             for key, val in data.items():
-                # val은 numpy 배열 (T, ...)
-                # frame[key] = val[i] (numpy)
-                # read_roco_hdf5는 numpy를 반환하고, add_frame은 dict(numpy or torch)를 받음.
                 frame[key] = val[i]
-            
             frame["task"] = "gearbox_assembly"
             dataset.add_frame(frame)
         
         dataset.save_episode()
         
+        # 처리 완료한 파일 삭제 (디스크 공간 절약)
+        if args.clean_cache and is_remote_repo(extract_repo_id(args.input)):
+            try:
+                file_path.unlink()
+                logger.debug(f"캐시 파일 삭제: {file_path}")
+            except Exception:
+                pass
+    
+    # 4. Finalize
     dataset.finalize()
+    logger.info(f"데이터셋 완료: 총 {dataset.num_episodes}개 에피소드")
 
-    # 5. 최종 출력 처리
+    # 5. 업로드
     if is_remote_output:
         logger.info(f"Hugging Face Hub로 데이터셋 푸시 중: {repo_id}")
         dataset.push_to_hub()
+        logger.info("업로드 완료!")
+        
+        # 캐시 정리
+        if args.clean_cache and output_dir.exists():
+            logger.info("임시 디렉토리 정리 중...")
+            shutil.rmtree(output_dir)
     else:
         logger.info(f"데이터셋이 로컬에 저장되었습니다: {dataset.root}")
-        # repo_id가 주어졌을 때 데이터셋 클래스가 기본 캐시 디렉토리에 쓰는 경우를 대비해 
-        # 이동이 필요할 수 있습니다.
-        # 현재는 `LeRobotDataset.create(root=output_dir, ...)`가 해당 위치에 직접 쓴다고 가정합니다.
 
 
 if __name__ == "__main__":
